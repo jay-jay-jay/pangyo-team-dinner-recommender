@@ -235,14 +235,54 @@ def main():
 
     st.sidebar.markdown("---")
 
-    # [2] 회식 일정 선택
-    st.sidebar.subheader("📅 2. 회식 일정")
+    # [2] 회식 후보 일정 다중 선택 (중복/복수 날짜 지원)
+    st.sidebar.subheader("📅 2. 회식 후보 일정 (다중 선택)")
     today = datetime.date.today()
-    default_date = today + datetime.timedelta(days=(4 - today.weekday()) % 7)
-    selected_date = st.sidebar.date_input("회식 예정일", value=default_date)
-    sel_weekday_code = weekday_kr[selected_date.weekday()]
-    sel_weekday_name = weekday_names[selected_date.weekday()]
-    st.sidebar.caption(f"선택일: **{selected_date.year}년 {selected_date.month}월 {selected_date.day}일 ({sel_weekday_name})**")
+
+    # 향후 30일간의 날짜 목록 생성 (한국어 요일 포함)
+    upcoming_dates = []
+    date_map = {}
+    for i in range(30):
+        d = today + datetime.timedelta(days=i)
+        w_kr = weekday_kr[d.weekday()]
+        label = f"{d.strftime('%Y-%m-%d')} ({w_kr}요일)"
+        upcoming_dates.append(label)
+        date_map[label] = (d, w_kr)
+
+    # 기본값: 이번 주/다음 주 목요일, 금요일 2개 날짜를 기본 후보로 선택
+    default_selected = []
+    for lbl in upcoming_dates[:14]:
+        if "목요일" in lbl or "금요일" in lbl:
+            default_selected.append(lbl)
+            if len(default_selected) >= 2:
+                break
+    if not default_selected:
+        default_selected = [upcoming_dates[0]]
+
+    selected_date_labels = st.sidebar.multiselect(
+        "회식 후보 날짜 (복수 선택 가능)",
+        options=upcoming_dates,
+        default=default_selected,
+        help="여러 후보 날짜를 선택하시면 모든 후보일에 예약 가능한 식당을 분석합니다.",
+    )
+
+    if not selected_date_labels:
+        selected_date_labels = [upcoming_dates[0]]
+        st.sidebar.caption("⚠️ 최소 1개 이상의 날짜가 필요하여 오늘 날짜가 기본 선택되었습니다.")
+
+    # 선택된 날짜 객체 및 요일 리스트
+    selected_date_objs = [date_map[lbl] for lbl in selected_date_labels if lbl in date_map]
+    date_summary_str = ", ".join([f"{d.month}/{d.day}({w})" for d, w in selected_date_objs[:3]])
+    if len(selected_date_objs) > 3:
+        date_summary_str += f" 외 {len(selected_date_objs)-3}일"
+
+    st.sidebar.caption(f"선택된 후보일: **총 {len(selected_date_objs)}개 일자** ({date_summary_str})")
+
+    filter_strict_open = st.sidebar.checkbox(
+        "선택한 모든 후보일에 영업하는 곳만 보기",
+        value=True,
+        help="체크 시 선택하신 모든 후보일에 휴무가 없는 식당만 추천합니다.",
+    )
 
     st.sidebar.markdown("---")
 
@@ -328,21 +368,30 @@ def main():
     if filter_region_key == "전체" and loc_mode == "🔍 지하철역/지명 직접 검색":
         df = df[df["distance_m_from_hub"] <= (search_radius_m * 1.5)]
 
-    # 5. 휴무일 판정
-    def check_open_status(closed_str: str, day_code: str) -> str:
+    # 5. 다중 후보일 휴무 판정
+    def evaluate_multi_dates_open(closed_str: str, date_objs: list) -> Tuple[str, str]:
         if not closed_str or closed_str.strip() == "":
-            return "정보없음"
+            return "정보없음", "휴무 정보 없음"
         closed_list = [d.strip() for d in str(closed_str).split(",")]
-        if day_code in closed_list:
-            return "휴무"
-        return "영업"
 
-    df["open_status"] = df["closed_days"].apply(
-        lambda cd: check_open_status(cd, sel_weekday_code)
+        conflict_labels = []
+        for d_obj, w_code in date_objs:
+            if w_code in closed_list:
+                conflict_labels.append(f"{d_obj.month}/{d_obj.day}({w_code})")
+
+        if conflict_labels:
+            return "일부휴무", f"⚠️ {', '.join(conflict_labels)} 휴무"
+        return "영업", "✅ 모든 후보일 영업"
+
+    df_status_res = df["closed_days"].apply(
+        lambda cd: evaluate_multi_dates_open(cd, selected_date_objs)
     )
+    df["open_status"] = [s[0] for s in df_status_res]
+    df["open_desc"] = [s[1] for s in df_status_res]
 
-    # 선택 요일 휴무 식당 제외
-    df = df[df["open_status"] != "휴무"]
+    # 사용자가 '모든 후보일에 영업하는 곳만 보기'를 선택했을 경우 일부 휴무 식당 필터링
+    if filter_strict_open:
+        df = df[df["open_status"] != "일부휴무"]
 
     # 6. 다차원 적합도 스코어링 계산
     df["match_score"] = df.apply(
@@ -368,7 +417,10 @@ def main():
             value=f"{target_headcount}명 / {target_budget:,}원",
         )
     with m4:
-        st.metric(label="📍 기준 위치 / 요일", value=f"{current_hub_name[:7]}.. / {sel_weekday_name}")
+        st.metric(
+            label="📍 기준 위치 / 후보일수",
+            value=f"{current_hub_name[:6]}.. / {len(selected_date_objs)}개 일자",
+        )
 
     st.markdown("<div style='margin-bottom: 15px;'></div>", unsafe_allow_html=True)
 
@@ -399,7 +451,10 @@ def main():
                         if status_val == "정보없음":
                             status_html = '<span class="warn-badge">⚠️ 휴무일 확인 필요</span>'
                         elif status_val == "영업":
-                            status_html = '<span class="open-badge">✅ 정상영업</span>'
+                            status_html = '<span class="open-badge">✅ 모든 후보일 영업</span>'
+                        elif status_val == "일부휴무":
+                            desc_txt = row.get("open_desc", "일부 후보일 휴무")
+                            status_html = f'<span class="warn-badge">{desc_txt}</span>'
 
                         st.markdown(
                             f'<span class="region-badge">📍 {reg_tag}</span>'
