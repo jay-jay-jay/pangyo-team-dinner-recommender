@@ -1,5 +1,6 @@
 import datetime
 import os
+import urllib.parse
 from typing import Any
 import pandas as pd
 import streamlit as st
@@ -285,8 +286,10 @@ if not df_raw.empty:
                             f"⭐ **평점:** {rating_val:.1f}점 &nbsp;|&nbsp; 📝 **리뷰:** {review_val:,}건 &nbsp;|&nbsp; 📞 **전화:** `{phone_val}`"
                         )
                     with c_info2:
-                        place_url = row.get("place_url", "https://map.kakao.com")
-                        st.link_button("🗺️ 카카오맵 상세", url=place_url, use_container_width=True)
+                        place_name = str(row.get("name", "식당"))
+                        encoded_query = urllib.parse.quote(place_name)
+                        kakao_search_url = f"https://map.kakao.com/link/search/{encoded_query}"
+                        st.link_button("🗺️ 카카오맵 상세", url=kakao_search_url, use_container_width=True)
 
     # --- TAB 2: 인터랙티브 지도 보기 (좌표, 주소, 툴팁) ---
     with tab2:
